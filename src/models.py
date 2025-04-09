@@ -9,6 +9,7 @@ from torch.nn import TransformerEncoder
 from torch.nn import TransformerDecoder
 from src.dlutils import *
 from src.constants import *
+import math
 torch.manual_seed(1)
 
 ## Separate LSTM for each variable
@@ -709,9 +710,6 @@ class LoadPredictor(nn.Module):
         return self.network(x)
 	
 
-	import torch
-import torch.nn as nn
-import math
 
 class PatchTSTModel(nn.Module):
     def __init__(self, input_dim, window_length, patch_size, num_layers, d_model, num_heads, dropout=0.1, output_dim=2):
