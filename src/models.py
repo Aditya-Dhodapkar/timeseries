@@ -710,70 +710,85 @@ class LoadPredictor(nn.Module):
         return self.network(x)
 	
 
-
+	
 class PatchTSTModel(nn.Module):
-    def __init__(self, input_dim, window_length, patch_size, num_layers, d_model, num_heads, dropout=0.1, output_dim=2):
-        """
-        Args:
-            input_dim: Number of features per time step.
-            window_length: Total number of time steps in the input window (e.g., 96, 168, etc.).
-            patch_size: Number of consecutive time steps per patch.
-            num_layers: Number of transformer encoder layers.
-            d_model: Dimensionality of the patch embedding.
-            num_heads: Number of attention heads in each transformer layer.
-            dropout: Dropout rate.
-            output_dim: Number of outputs. Here we use 2 (predicted mean and std deviation).
-        """
+    def __init__(self, input_dim, window_length, patch_size, num_layers, d_model, num_heads, dropout=0.1):
         super(PatchTSTModel, self).__init__()
         self.window_length = window_length
         self.patch_size = patch_size
         self.num_patches = window_length // patch_size
         self.d_model = d_model
-
-        # Project each patch (flattened) to the d_model dimension.
+        
+        # Input normalization layer
+        self.input_norm = nn.LayerNorm(input_dim)
+        
+        # Project each patch to the d_model dimension
         self.patch_proj = nn.Linear(input_dim * patch_size, d_model)
-
-        # Learnable positional embeddings for patches.
+        
+        # Learnable positional embeddings for patches
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, d_model))
         self.dropout = nn.Dropout(dropout)
-
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads, dim_feedforward=4*d_model, dropout=dropout)
+        
+        # Transformer encoder layer with layer normalization first (pre-norm)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=num_heads,
+            dim_feedforward=4*d_model, 
+            dropout=dropout,
+            activation='gelu',  # Use GELU activation instead of ReLU
+            batch_first=True,   # Use batch_first to simplify code
+            norm_first=True     # Pre-norm for better training stability
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Two separate heads for probabilistic forecasting:
-        # One for the predicted mean and one for the log standard deviation.
-        self.fc_mean = nn.Linear(d_model, output_dim // 2)
-        self.fc_logstd = nn.Linear(d_model, output_dim // 2)
-
+        # Multi-step decoding with attention mechanism
+        self.decoder = nn.GRU(d_model, d_model, batch_first=True)
+        self.hour_embedding = nn.Parameter(torch.randn(24, d_model))
+        
+        # Output layer with a more complex path
+        self.fc1 = nn.Linear(d_model, d_model)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(d_model, 1)
+        
     def forward(self, x):
         """
         Args:
             x: Input tensor of shape [B, window_length, input_dim].
         Returns:
-            A tensor of shape [B, 2] where the first half represents the predicted mean
-            and the second half the predicted standard deviation (after exponentiation).
+            Hourly predictions for next 24 hours [B, 24]
         """
         B, T, D = x.shape
-        # Reshape into patches: [B, num_patches, patch_size, D]
+        
+        # Apply input normalization
+        x = self.input_norm(x)
+        
+        # Reshape into patches
         x = x.view(B, self.num_patches, self.patch_size, D)
-        # Flatten each patch: [B, num_patches, patch_size * D]
+        # Flatten each patch
         x = x.view(B, self.num_patches, self.patch_size * D)
         # Project each patch to d_model
-        x = self.patch_proj(x)  # shape: [B, num_patches, d_model]
-        # Add positional embeddings and apply dropout
+        x = self.patch_proj(x)  # [B, num_patches, d_model]
+        
+        # Add positional embeddings
         x = x + self.pos_embedding
         x = self.dropout(x)
-        # Transformer expects input shape [num_patches, B, d_model]
-        x = x.transpose(0, 1)
+        
         # Pass through transformer encoder
-        x = self.transformer_encoder(x)  # [num_patches, B, d_model]
-        # Pool across patches (e.g., average)
-        x = x.mean(dim=0)  # [B, d_model]
-        # Predict mean
-        pred_mean = self.fc_mean(x)  # [B, 1] if output_dim==2
-        # Predict standard deviation in log-space and exponentiate to ensure positivity
-        pred_logstd = self.fc_logstd(x)
-        pred_std = torch.exp(pred_logstd)
-        # Concatenate mean and std predictions
-        out = torch.cat([pred_mean, pred_std], dim=1)  # [B, 2]
-        return out
+        x = self.transformer_encoder(x)  # [B, num_patches, d_model]
+        
+        # Use the last encoder output as context for decoder
+        context = x.mean(dim=1).unsqueeze(1).repeat(1, 24, 1)  # [B, 24, d_model]
+        
+        # Add hour embeddings to provide time information
+        hour_emb = self.hour_embedding.unsqueeze(0).repeat(B, 1, 1)  # [B, 24, d_model]
+        decoder_input = context + hour_emb
+        
+        # Pass through RNN decoder
+        decoder_output, _ = self.decoder(decoder_input)  # [B, 24, d_model]
+        
+        # Final projection to get hourly predictions
+        outputs = self.fc1(decoder_output)
+        outputs = self.act(outputs)
+        outputs = self.fc2(outputs).squeeze(-1)  # [B, 24]
+        
+        return outputs

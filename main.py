@@ -16,6 +16,7 @@ from pprint import pprint
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 from preprocess import preprocess_with_autoencoder
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import sys
 
 # from beepy import beep
 
@@ -32,6 +33,23 @@ import argparse
 # parser.add_argument('--advanced', action='store_true',
 #                    help='Use advanced feature extraction with temp and GHI autoencoders')
 # args = parser.parse_args()
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', type=str, default='LoadPredictor', help='Model to train: LoadAutoEncoder, TempAutoEncoder, GHIAutoEncoder, or LoadPredictor')
+parser.add_argument('--dataset', type=str, default='temp_ghi', help='Dataset to use')
+parser.add_argument('--retrain', action='store_true', help='Whether to retrain the model')
+parser.add_argument('--advanced', action='store_true', help='Use advanced feature extraction with temp and GHI autoencoders')
+parser.add_argument('--use_patchtst', action='store_true', help='Train and evaluate with PatchTST model')
+parser.add_argument('--window_length', type=int, default=24, help='Total time‑steps in your input window (e.g. 48, 96, 168)')
+parser.add_argument('--patch_size', type=int, default=24, help='Number of time steps per patch (for PatchTST)')
+parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer encoder layers in PatchTST')
+parser.add_argument('--d_model', type=int, default=64, help='Embedding dimension for PatchTST')
+parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads in PatchTST')
+parser.add_argument('--epochs_patchtst', type=int, default=30, help='Epochs to train PatchTST')
+parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
+args = parser.parse_args()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -253,31 +271,11 @@ def backprop(epoch, model, data_loader, optimizer, scheduler, training=True):
 
 
 
-import os
-import torch
-import numpy as np
-import torch.nn as nn
-import matplotlib.pyplot as plt
-from torch.utils.data import TensorDataset, DataLoader
-from src.models import LoadAutoEncoder, TempAutoEncoder, GHIAutoEncoder, LoadPredictor
-from preprocess import preprocess_with_autoencoder
-from src.folderconstants import output_folder
-import pickle
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 # -----------------------------
 # 1. Argument Parsing
 # -----------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='LoadPredictor', help='Model to train: LoadAutoEncoder, TempAutoEncoder, GHIAutoEncoder, or LoadPredictor')
-parser.add_argument('--dataset', type=str, default='temp_ghi', help='Dataset to use')
-parser.add_argument('--retrain', action='store_true', help='Whether to retrain the model')
-parser.add_argument('--advanced', action='store_true', help='Use advanced feature extraction with temp and GHI autoencoders')
-parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
-args = parser.parse_args()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
 # -----------------------------
 # 2. Load or train autoencoders
@@ -447,67 +445,263 @@ val_dataset = TensorDataset(valX, valY)
 train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
+## -----------------------------
+# 6. Train models
 # -----------------------------
-# 6. Train regression model
-# -----------------------------
-print("\nTraining Load Predictor model...")
-model = LoadPredictor(input_dim=train_features.shape[1]).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-criterion = nn.MSELoss()
-
-num_epochs = args.epochs
-best_val_loss = float('inf')
-patience = 10  # Early stopping patience
-patience_counter = 0
-
-train_losses = []
-val_losses = []
-
-for epoch in range(num_epochs):
-    # Training phase
-    model.train()
-    running_loss = 0.0
-    for batchX, batchY in train_loader:
-        batchX, batchY = batchX.to(device), batchY.to(device)
-        optimizer.zero_grad()
-        predY = model(batchX)
-        loss = criterion(predY, batchY)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item() * batchX.size(0)
+# Enhanced training process
+if args.model == 'PatchTST':
+    # Better hyperparameters
+    window_length = 72      # Use 3 days of data to predict next day
+    patch_size = 6          # Smaller patches (e.g., 6-hour patches)
+    num_layers = 4          # More transformer layers
+    d_model = 256           # Larger embedding dimension
+    num_heads = 8           # More attention heads
+    batch_size = 16         # Smaller batch size for better gradient estimates
+    epochs_patchtst = 100   # Train for more epochs with early stopping
     
-    train_loss = running_loss / len(train_loader.dataset)
-    train_losses.append(train_loss)
+    # Create enhanced train/test split with normalization
+    # Extract features and targets for each day
+    # Structure: use past 3 days to predict next day
+    X_data = []
+    y_data = []
     
-    # Validation phase
+    # Calculate max samples to create
+    valid_samples = train_features_norm.shape[0] - window_length - 24
+    
+    # Create training samples with sliding window
+    for i in range(0, valid_samples, 6):  # Step by 6 hours to avoid too much overlap
+        X_data.append(train_features_norm[i:i+window_length])
+        y_data.append(train_targets_norm[i+window_length:i+window_length+24])
+    
+    X_data = np.array(X_data)
+    y_data = np.array(y_data)
+    
+    print(f"Training data shape: X={X_data.shape}, y={y_data.shape}")
+    
+    # Create proper train/validation split
+    indices = np.arange(len(X_data))
+    np.random.shuffle(indices)
+    split = int(0.85 * len(indices))
+    train_indices = indices[:split]
+    val_indices = indices[split:]
+    
+    X_train, y_train = X_data[train_indices], y_data[train_indices]
+    X_val, y_val = X_data[val_indices], y_data[val_indices]
+    
+    # Create PyTorch datasets
+    train_dataset = TensorDataset(torch.from_numpy(X_train).float(), torch.from_numpy(y_train).float())
+    val_dataset = TensorDataset(torch.from_numpy(X_val).float(), torch.from_numpy(y_val).float())
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    # Create enhanced model
+    model = PatchTSTModel(
+        input_dim=train_features_norm.shape[1],
+        window_length=window_length,
+        patch_size=patch_size,
+        num_layers=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        dropout=0.2
+    ).to(device)
+    
+    # Use a more sophisticated optimizer and learning rate schedule
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    
+    # Learning rate scheduler with warmup
+    def get_lr_scheduler(optimizer, warmup_steps, max_steps):
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return max(0.0, float(max_steps - step) / float(max(1, max_steps - warmup_steps)))
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    total_steps = epochs_patchtst * len(train_loader)
+    warmup_steps = total_steps // 10
+    scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
+    
+    # Initialize tracking variables
+    best_val_loss = float('inf')
+    patience = 15
+    patience_counter = 0
+    epoch_losses = []
+    
+    # Training loop
+    for ep in range(epochs_patchtst):
+        # Training
+        model.train()
+        train_loss = 0.0
+        for step, (bx, by) in enumerate(train_loader):
+            bx, by = bx.to(device), by.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(bx)
+            
+            # Use Huber loss for robustness to outliers
+            loss = F.huber_loss(outputs, by, delta=1.0)
+            loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            scheduler.step()
+            
+            train_loss += loss.item() * bx.size(0)
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for bx, by in val_loader:
+                bx, by = bx.to(device), by.to(device)
+                outputs = model(bx)
+                loss = F.mse_loss(outputs, by)  # Use MSE for validation to get true error
+                val_loss += loss.item() * bx.size(0)
+        
+        # Calculate average losses
+        avg_train_loss = train_loss / len(train_dataset)
+        avg_val_loss = val_loss / len(val_dataset)
+        epoch_losses.append((avg_train_loss, avg_val_loss))
+        
+        print(f"PatchTST Epoch {ep+1}/{epochs_patchtst}  Train Loss {avg_train_loss:.6f}  Val Loss {avg_val_loss:.6f}")
+        
+        # Check for early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), f"checkpoints/PatchTST_{args.dataset}_best.pt")
+            patience_counter = 0
+            print(f"  New best model saved!")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {ep+1}")
+                break
+    
+    # Load best model for evaluation
+    model.load_state_dict(torch.load(f"checkpoints/PatchTST_{args.dataset}_best.pt"))
+    
+    # Testing on Year 2 data
+    test_start_idx = 0  # Start from the beginning of Year 2 data
+    y2_features = test_features_norm[test_start_idx:test_start_idx+window_length]
+    y2_input = torch.from_numpy(y2_features).float().unsqueeze(0).to(device)
+    
+    # Get Year 2 actual values for comparison
+    dataset_folder = os.path.join("data", args.dataset)
+    df = pd.read_excel(os.path.join(dataset_folder, "training.xlsx"))
+    year2_data = df[df['Year'] == 2]
+    year2_hourly = year2_data['Load'].values
+    
+    # Make prediction
     model.eval()
-    running_val_loss = 0.0
     with torch.no_grad():
-        for batchX, batchY in val_loader:
+        y2_pred_norm = model(y2_input).squeeze(0).cpu().numpy()
+    
+    # Denormalize predictions
+    y2_predictions = y2_pred_norm * (targets_max - targets_min) + targets_min
+    
+    # Get the actual values for the next 24 hours
+    actual_start = window_length  # Start after the window used for input
+    y2_actuals = year2_hourly[actual_start:actual_start+24]
+    
+    # Print comparison table
+    print("\nFirst 24 Hours - Year 2 Comparison (Actual vs Predicted):")
+    print("Hour\tActual\tPredicted\tDifference\tPercent Error")
+    
+    for hour in range(24):
+        if hour < len(y2_predictions) and hour < len(y2_actuals):
+            actual = y2_actuals[hour]
+            predicted = y2_predictions[hour]
+            diff = predicted - actual
+            pct_error = (diff / actual) * 100 if actual != 0 else float('inf')
+            print(f"{hour}\t{actual:.1f}\t{predicted:.1f}\t{diff:.1f}\t{pct_error:.2f}%")
+    
+    # Calculate metrics
+    mae = mean_absolute_error(y2_actuals, y2_predictions)
+    rmse = np.sqrt(mean_squared_error(y2_actuals, y2_predictions))
+    r2 = r2_score(y2_actuals, y2_predictions)
+    
+    print(f"\nFirst 24 Hours Summary Statistics:")
+    print(f"MAE: {mae:.2f}")
+    print(f"RMSE: {rmse:.2f}")
+    print(f"R²: {r2:.4f}")
+    
+    # Plot predictions vs actuals
+    plt.figure(figsize=(12, 6))
+    plt.plot(y2_actuals, label='Actual', marker='o', alpha=0.7)
+    plt.plot(y2_predictions, label='Predicted', marker='x', alpha=0.7)
+    plt.title('PatchTST: Actual vs Predicted Load (First 24 Hours)')
+    plt.xlabel('Hour')
+    plt.ylabel('Load')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join("plots", "patchtst_predictions.png"))
+    plt.close()
+    
+    print("PatchTST model training and evaluation completed successfully.")
+    sys.exit(0)
+    
+else:
+    # Existing regression MLP branch
+    print("\nTraining Load Predictor model...")
+    model = LoadPredictor(input_dim=train_features.shape[1]).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    
+    num_epochs = args.epochs
+    best_val_loss = float('inf')
+    patience = 10  # Early stopping patience
+    patience_counter = 0
+    
+    train_losses = []
+    val_losses = []
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        running_loss = 0.0
+        for batchX, batchY in train_loader:
             batchX, batchY = batchX.to(device), batchY.to(device)
+            optimizer.zero_grad()
             predY = model(batchX)
-            val_loss = criterion(predY, batchY)
-            running_val_loss += val_loss.item() * batchX.size(0)
-    
-    val_loss = running_val_loss / len(val_loader.dataset)
-    val_losses.append(val_loss)
-    
-    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
-    
-    # Save model if it's the best so far
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        model_path = os.path.join("checkpoints", f"LoadPredictor_{args.dataset}_best.pt")
-        torch.save(model.state_dict(), model_path)
-        print(f"New best model saved at epoch {epoch+1}")
-        patience_counter = 0
-    else:
-        patience_counter += 1
-    
-    # Early stopping
-    if patience_counter >= patience:
-        print(f"Early stopping at epoch {epoch+1}")
-        break
+            loss = criterion(predY, batchY)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * batchX.size(0)
+        
+        train_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(train_loss)
+        
+        # Validation phase
+        model.eval()
+        running_val_loss = 0.0
+        with torch.no_grad():
+            for batchX, batchY in val_loader:
+                batchX, batchY = batchX.to(device), batchY.to(device)
+                predY = model(batchX)
+                val_loss = criterion(predY, batchY)
+                running_val_loss += val_loss.item() * batchX.size(0)
+        
+        val_loss = running_val_loss / len(val_loader.dataset)
+        val_losses.append(val_loss)
+        
+        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+        
+        # Save model if it's the best so far
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            model_path = os.path.join("checkpoints", f"LoadPredictor_{args.dataset}_best.pt")
+            torch.save(model.state_dict(), model_path)
+            print(f"New best model saved at epoch {epoch+1}")
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        # Early stopping
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
 
 # Save autoencoders for future use
 torch.save(autoencoder.state_dict(), autoencoder_path)
@@ -518,14 +712,18 @@ if args.advanced:
     torch.save(ghi_autoencoder.state_dict(), ghi_autoencoder_path)
     print(f"Saved TempAutoEncoder to {temp_autoencoder_path}")
     print(f"Saved GHIAutoEncoder to {ghi_autoencoder_path}")
-
 # -----------------------------
 # 7. Evaluate on validation data
 # -----------------------------
 print("\nEvaluating on validation data...")
 # Load best model
-best_model_path = os.path.join("checkpoints", f"LoadPredictor_{args.dataset}_best.pt")
-model.load_state_dict(torch.load(best_model_path))
+if args.model == 'LoadPredictor':
+    best_model_path = os.path.join("checkpoints", f"LoadPredictor_{args.dataset}_best.pt")
+    model.load_state_dict(torch.load(best_model_path))
+elif args.model == 'PatchTST':
+    # This block shouldn't run due to the sys.exit() above, but just in case:
+    best_model_path = os.path.join("checkpoints", f"PatchTST_{args.dataset}.pt")
+    model.load_state_dict(torch.load(best_model_path))
 model.eval()
 
 val_predictions = []
@@ -736,4 +934,5 @@ plt.tight_layout()
 plt.savefig(os.path.join("plots", "january_1_2_comparison.png"))
 plt.close()
 
-print("Done. Plots saved to 'plots' directory.")
+print("Done. To train PatchTST on Year1→Year2, run with:")
+print("  python main.py --dataset temp_ghi --window_length 48 --use_patchtst")
