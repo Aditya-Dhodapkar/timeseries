@@ -606,7 +606,7 @@ if args.model == 'PatchTST':
     y2_actuals = year2_hourly[actual_start:actual_start+24]
     
     # Print comparison table
-    print("\n Hours 72 - 96: Year 2 Comparison (Actual vs Predicted):")
+    print("\nHours 48 - 72: Year 2 Comparison (Actual vs Predicted):")
     header = f"{'Hour':>4} {'Actual':>8} {'Predicted':>10} {'Difference':>12} {'% Error':>10}"
     print(header)
     print("-" * len(header))
@@ -626,7 +626,7 @@ if args.model == 'PatchTST':
     rmse = np.sqrt(mean_squared_error(y2_actuals, y2_predictions))
     r2 = r2_score(y2_actuals, y2_predictions)
     
-    print(f"\Day 3 -  24 Hours Summary Statistics:")
+    print(f"\nDay 3 -  24 Hours Summary Statistics:")
     print(f"MAE: {mae:.2f}")
     print(f"RMSE: {rmse:.2f}")
     print(f"R²: {r2:.4f}")
