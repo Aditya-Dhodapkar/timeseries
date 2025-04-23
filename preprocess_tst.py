@@ -13,6 +13,12 @@ def normalize3(a, min_a=None, max_a=None):
         min_a, max_a = np.min(a, axis=0), np.max(a, axis=0)
     return (a - min_a) / (max_a - min_a + 0.0001), min_a, max_a
 
+def create_cyclical_features(value, period):
+    """Create sine and cosine features from a cyclical time variable"""
+    sin_feat = np.sin(2 * np.pi * value / period)
+    cos_feat = np.cos(2 * np.pi * value / period)
+    return sin_feat, cos_feat
+
 def load_training_data(dataset):
     dataset_folder = os.path.join("data", dataset)
     df = pd.read_excel(os.path.join(dataset_folder, "training.xlsx"))
@@ -30,6 +36,12 @@ def load_testing_data(dataset):
     print(f"DataFrame shape: {df.shape}")
     return df
 
+def create_cyclical_features(value, period):
+    """Create sine and cosine features from a cyclical time variable"""
+    sin_feat = np.sin(2 * np.pi * value / period)
+    cos_feat = np.cos(2 * np.pi * value / period)
+    return sin_feat, cos_feat
+
 def preprocess_with_autoencoder(dataset, autoencoder_model, window_length=24, temp_autoencoder_model=None, ghi_autoencoder_model=None):
     """
     Preprocesses data for the hourly autoencoder+regression pipeline with cross‑validation and advanced feature extraction.
@@ -41,9 +53,9 @@ def preprocess_with_autoencoder(dataset, autoencoder_model, window_length=24, te
       - For each complete day (with exactly window_length hours), extract:
             • Load values (shape: (window_length,))
             • In advanced mode: Temperature and GHI values (transposed so each site becomes a row).
-      - Compute latent representations for the load using the autoencoder’s encoder (process daywise).
+      - Compute latent representations for the load using the autoencoder's encoder (process daywise).
       - If advanced mode is active, also compute latent representations for temperature and GHI using their respective autoencoders.
-      - Expand each day’s latent vector by repeating it window_length times.
+      - Expand each day's latent vector by repeating it window_length times.
       - In advanced mode, combine the load latent with averaged temperature and GHI latent features (across 5 sites) to form a combined latent vector.
       - Append seasonal features (sin/cos of day-of-year computed from Month/Day).
       - Concatenate the static features (now with added seasonal features) with the combined latent features to yield, for example, a 29‑dimensional feature vector per hourly sample (13 static + 16 latent if advanced mode is used).
@@ -251,6 +263,57 @@ def preprocess_with_autoencoder(dataset, autoencoder_model, window_length=24, te
     val_static = np.concatenate([val_static, val_sin, val_cos], axis=1)
     test_static = np.concatenate([test_static, test_sin, test_cos], axis=1)
     
+    # Add cyclical time features for hour of day
+    train_hour_of_day = actual_train_df['Hour'].values
+    val_hour_of_day = val_df['Hour'].values
+    test_hour_of_day = test_df['Hour'].values
+
+    train_hour_sin, train_hour_cos = create_cyclical_features(train_hour_of_day, 24)
+    val_hour_sin, val_hour_cos = create_cyclical_features(val_hour_of_day, 24)
+    test_hour_sin, test_hour_cos = create_cyclical_features(test_hour_of_day, 24)
+
+    # Add cyclical time features for day of week (assuming we can compute it)
+    # First, create day of week (0-6) from Year, Month, Day
+    def compute_day_of_week(year, month, day):
+        # Simple approximation - this isn't perfect but works for relative day of week
+        # For a more accurate version, you might want to use a library like pandas
+        days_since_epoch = 365 * year + 30 * month + day
+        return days_since_epoch % 7
+
+    train_day_of_week = np.array([compute_day_of_week(row['Year'], row['Month'], row['Day']) 
+                                for _, row in actual_train_df.iterrows()])
+    val_day_of_week = np.array([compute_day_of_week(row['Year'], row['Month'], row['Day']) 
+                               for _, row in val_df.iterrows()])
+    test_day_of_week = np.array([compute_day_of_week(row['Year'], row['Month'], row['Day']) 
+                               for _, row in test_df.iterrows()])
+
+    train_day_sin, train_day_cos = create_cyclical_features(train_day_of_week, 7)
+    val_day_sin, val_day_cos = create_cyclical_features(val_day_of_week, 7)
+    test_day_sin, test_day_cos = create_cyclical_features(test_day_of_week, 7)
+
+    # Reshape to column vectors
+    train_hour_sin = train_hour_sin.reshape(-1, 1)
+    train_hour_cos = train_hour_cos.reshape(-1, 1)
+    train_day_sin = train_day_sin.reshape(-1, 1)
+    train_day_cos = train_day_cos.reshape(-1, 1)
+
+    val_hour_sin = val_hour_sin.reshape(-1, 1)
+    val_hour_cos = val_hour_cos.reshape(-1, 1)
+    val_day_sin = val_day_sin.reshape(-1, 1)
+    val_day_cos = val_day_cos.reshape(-1, 1)
+
+    test_hour_sin = test_hour_sin.reshape(-1, 1)
+    test_hour_cos = test_hour_cos.reshape(-1, 1)
+    test_day_sin = test_day_sin.reshape(-1, 1)
+    test_day_cos = test_day_cos.reshape(-1, 1)
+
+    # Add these cyclical features to the static features
+    train_static = np.concatenate([train_static, train_hour_sin, train_hour_cos, train_day_sin, train_day_cos], axis=1)
+    val_static = np.concatenate([val_static, val_hour_sin, val_hour_cos, val_day_sin, val_day_cos], axis=1)
+    test_static = np.concatenate([test_static, test_hour_sin, test_hour_cos, test_day_sin, test_day_cos], axis=1)
+
+    print(f"Static features with cyclical time features added - shapes: train={train_static.shape}, val={val_static.shape}, test={test_static.shape}")
+    
     # Finally, create final feature arrays by concatenating static and combined latent features
     train_final = np.concatenate([train_static, train_combined_latent], axis=1)
     val_final = np.concatenate([val_static, val_combined_latent], axis=1)
@@ -316,3 +379,7 @@ if __name__ == '__main__':
         print("Trained autoencoder not found. Please train it first.")
         sys.exit(1)
     preprocess_with_autoencoder(dataset, autoencoder, window_length=args.window_length)
+
+
+
+

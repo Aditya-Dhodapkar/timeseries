@@ -606,23 +606,27 @@ if args.model == 'PatchTST':
     y2_actuals = year2_hourly[actual_start:actual_start+24]
     
     # Print comparison table
-    print("\nFirst 24 Hours - Year 2 Comparison (Actual vs Predicted):")
-    print("Hour\tActual\tPredicted\tDifference\tPercent Error")
-    
+    print("\n Hours 72 - 96: Year 2 Comparison (Actual vs Predicted):")
+    header = f"{'Hour':>4} {'Actual':>8} {'Predicted':>10} {'Difference':>12} {'% Error':>10}"
+    print(header)
+    print("-" * len(header))
+
     for hour in range(24):
-        if hour < len(y2_predictions) and hour < len(y2_actuals):
-            actual = y2_actuals[hour]
-            predicted = y2_predictions[hour]
-            diff = predicted - actual
-            pct_error = (diff / actual) * 100 if actual != 0 else float('inf')
-            print(f"{hour}\t{actual:.1f}\t{predicted:.1f}\t{diff:.1f}\t{pct_error:.2f}%")
-    
+        actual    = y2_actuals[hour]
+        predicted = y2_predictions[hour]
+        diff      = predicted - actual
+        pct_error = (diff / actual * 100) if actual != 0 else float('nan')
+        print(f"{hour:<4} "
+              f"{actual:<8.1f} "
+              f"{predicted:<10.1f} "
+              f"{diff:<12.1f} "
+              f"{pct_error:<9.2f}%")
     # Calculate metrics
     mae = mean_absolute_error(y2_actuals, y2_predictions)
     rmse = np.sqrt(mean_squared_error(y2_actuals, y2_predictions))
     r2 = r2_score(y2_actuals, y2_predictions)
     
-    print(f"\nFirst 24 Hours Summary Statistics:")
+    print(f"\Day 3 -  24 Hours Summary Statistics:")
     print(f"MAE: {mae:.2f}")
     print(f"RMSE: {rmse:.2f}")
     print(f"R²: {r2:.4f}")
@@ -808,39 +812,56 @@ np.save(os.path.join(folder, 'year3_predictions_daily_scaled.npy'), year3_predic
 
 
 # Add after generating predictions
-# Extract January 1 (first 24 hours)
-# Instead of loading from npy file
+# Extract first 4 days (96 hours) of Year 2
 dataset_folder = os.path.join("data", args.dataset)
 df = pd.read_excel(os.path.join(dataset_folder, "training.xlsx"))
 year2_hourly = df[df['Year'] == 2]['Load'].values
 print(f"Year 2 hourly data shape (from Excel): {year2_hourly.shape}")
-print(f"Year 2 hourly data shape: {year2_hourly.shape if year2_hourly is not None else 'None'}")
-
 print(f"Year 2 hourly data exists: {len(year2_hourly) > 0}")
 
-print(f"First few values of Year 2 hourly data: {year2_hourly[:10] if len(year2_hourly) > 10 else year2_hourly}")
-jan_1_year2_actual = year2_hourly[:24]
-jan_1_year2_predicted = year3_predictions[:24]  # Using the existing "year3_predictions" variable
+# Get first 96 hours (January 1-4)
+first_4_days_actual = year2_hourly[:96]
+first_4_days_predicted = year3_predictions[:96]  # Using the existing "year3_predictions" variable
 
-# Print comparison table
-print("\nJanuary 1 - Year 2 Comparison (Actual vs Predicted):")
-print("Hour\tActual\tPredicted\tDifference\tPercent Error")
-for hour in range(24):
-    actual = jan_1_year2_actual[hour]
-    predicted = jan_1_year2_predicted[hour]
+# Print comparison table with fixed-width formatting for perfect alignment
+print("\nFirst 4 Days - Year 2 Comparison (Actual vs Predicted):")
+print(f"{'Hour':5} {'Day':5} {'Actual':10} {'Predicted':10} {'Difference':12} {'Percent Error':12}")
+print("-" * 60)
+
+for hour in range(96):
+    day = hour // 24 + 1  # Day 1, 2, 3, or 4
+    actual = first_4_days_actual[hour]
+    predicted = first_4_days_predicted[hour]
     diff = predicted - actual
     pct_error = (diff / actual) * 100 if actual != 0 else float('inf')
-    print(f"{hour}\t{actual:.1f}\t{predicted:.1f}\t{diff:.1f}\t{pct_error:.2f}%")
+    print(f"{hour:<5} {day:<5} {actual:<10.1f} {predicted:<10.1f} {diff:<12.1f} {pct_error:<10.2f}%")
 
-# Calculate summary statistics
-mae = mean_absolute_error(jan_1_year2_actual, jan_1_year2_predicted)
-rmse = np.sqrt(mean_squared_error(jan_1_year2_actual, jan_1_year2_predicted))
-r2 = r2_score(jan_1_year2_actual, jan_1_year2_predicted)
-print(f"\nJanuary 1 Summary Statistics:")
+# Calculate summary statistics for each day
+for day in range(1, 5):
+    start_hour = (day - 1) * 24
+    end_hour = day * 24
+    
+    day_actual = first_4_days_actual[start_hour:end_hour]
+    day_predicted = first_4_days_predicted[start_hour:end_hour]
+    
+    mae = mean_absolute_error(day_actual, day_predicted)
+    rmse = np.sqrt(mean_squared_error(day_actual, day_predicted))
+    r2 = r2_score(day_actual, day_predicted)
+    
+    print(f"\nDay {day} Summary Statistics:")
+    print(f"MAE: {mae:.2f}")
+    print(f"RMSE: {rmse:.2f}")
+    print(f"R²: {r2:.4f}")
+
+# Overall statistics for all 4 days
+mae = mean_absolute_error(first_4_days_actual, first_4_days_predicted)
+rmse = np.sqrt(mean_squared_error(first_4_days_actual, first_4_days_predicted))
+r2 = r2_score(first_4_days_actual, first_4_days_predicted)
+
+print(f"\nOverall 4-Day Summary Statistics:")
 print(f"MAE: {mae:.2f}")
 print(f"RMSE: {rmse:.2f}")
 print(f"R²: {r2:.4f}")
-
 
 
 
